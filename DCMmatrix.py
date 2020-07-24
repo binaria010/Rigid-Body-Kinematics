@@ -8,6 +8,9 @@ Created on Mon Jul 13 10:02:44 2020
 
 import numpy as np
 import math
+import scipy
+from scipy import optimize
+from scipy.linalg import *
 
 def M_axis(theta,axis):
     """
@@ -314,6 +317,8 @@ def DCM_to_EP(C) :
         b2 = (C[1,2]+C[2,1])/(4*b3)
     
     beta = np.array([b0, b1, b2, b3])
+    if beta[0] < 0:
+        beta = -1*beta
     
     return beta
 
@@ -503,4 +508,153 @@ def Subtract_MRPs(sigma1, sigma):
     
    
 
+######################################################################################
+                        
+                        # Attitude Determination Methods
+        
+######################################################################################
 
+def TRIAD(v_B1, v_B2, v_N1, v_N2) : 
+    """
+    This function computes the triad matrix or the DCM matrix of the body frame B relative to the innertial frame N if meassurements v_B, v_N in both frames are given by passing through a third frame T called the triad frame.
+    The name “TRIAD” can be considered either as the word “triad” or as an acronym for TRIaxial Attitude Determination.
+    Reference: Fundamentals of Spacecraft Attitude Determination and Control. Landis-Crassidis
+    Parameters
+    ----------
+    v_B1, v_B2 : 1d ndarray. Measurements in the B frame
+    v_N1, v_N2 : 1d ndarray. Measurements in the N frame
+    
+    Returns
+    -------
+    C : 3x3 ndarray. The DCM matrix corresponding to the attitude coordinates of the body relative to N, i.e the BN matrix.
+    
+    """
+    
+    v_B1 = v_B1/(norm(v_B1,2))
+    v_B2 = v_B2/(norm(v_B2,2))
+    v_N1 = v_N1/(norm(v_N1,2))
+    v_N2 = v_N2/(norm(v_N2,2))
+
+    ## T frame in both references
+    t_B1 = v_B1
+    t_B2 = np.cross(t_B1, v_B2)
+    t_B2 = t_B2/norm(t_B2)
+    t_B3 = np.cross(t_B1, t_B2)
+    
+    t_N1 = v_N1
+    t_N2 = np.cross(t_N1, v_N2)
+    t_N2 = t_N2/norm(t_N2)
+    t_N3 = np.cross(t_N1, t_N2)
+    
+    C = np.outer(t_B1, t_N1) + np.outer(t_B3, t_N3) + np.outer(t_B2, t_N2)
+
+    return C
+
+
+def KB(B, Z) :
+    KB =  np.vstack((np.hstack((np.trace(B), Z)), np.hstack((Z.reshape(-1,1), B + B.T - np.trace(B)*np.eye(3)))))
+    return KB
+
+def davenport(b, r, w):
+    """
+    this function applies the davenport method to estimate the DCM matrix barBN from measurements b and r relative to the body and to the inertial frame (or any other reference frame) respectively.
+    
+    Parameters
+    ----------
+    b : tuple. Measurements relative to the body frame.
+    r : tuple. Measurements relative to another reference frame.
+    w : tuple. Weights for each measurement.
+    
+    Returns
+    -------
+    barBN : 3x3 ndarray. The estimated DCM matrix.
+    
+    """
+    B = np.zeros((3,3))
+    Z = np.zeros(3)
+    for i in range(len(b)) :
+        B = B + w[i]*np.outer(b[i],r[i])
+        Z = Z + w[i]*np.cross(b[i],r[i])
+        
+    K = KB(B, Z)
+    alpha, v = eig(K)
+    
+    q = v[:,np.argmax(alpha)]
+    
+    if q[0] < 0 :
+        q = -1*q
+    print(q)
+    barBN = EP_to_DCM(q)
+    
+    return barBN
+
+#### QUEST Method ############################
+
+def adjugate(A):
+    """
+    This function computes the adjugate matrix of A, i.e the transpose of the cofactor matrix.
+    Parameters 
+    ----------
+    A : numpy array
+    
+    Returns
+    -------
+    C.T : numpy array.
+    
+    """
+    
+    U,sigma,Vt = np.linalg.svd(A)
+    N = len(sigma)
+    g = np.tile(sigma,N)
+    g[::(N+1)] = 1
+    G = np.diag(-(-1)**N*np.product(np.reshape(g,(N,N)),1)) 
+    C = U @ G @ Vt
+    
+    return  C.T
+        
+def QUEST(b, r, w) :
+    """
+    This function implements the QUEST method for attitude determination.
+    
+    Parameters
+    ----------
+    b : tuple. Measurements relative to the body frame.
+    r : tuple. Measurements relative to another reference frame.
+    w : tuple. Weights for each measurement.
+    
+
+
+    """
+    B = np.zeros((3,3))
+    Z = np.zeros(3)
+    for i in range(len(b)) :
+        B = B + w[i]*np.outer(b[i],r[i])
+        Z = Z + w[i]*np.cross(b[i],r[i])
+        
+
+    S = B + B.T
+    adjS = adjugate(S)
+    k = np.trace(adjS)
+    a = np.trace(B)
+    aa = det(S)
+    z = Z@Z  # norm squared of Z
+
+    f = lambda t: (t**2 -a**2 + k)*(t**2 - a**2 - z) - (t - a)*(Z@(S@Z) + aa) - Z@(S@S@Z)
+    fprime = lambda t : t*(4*t**2 - 4*a**2 - 2*z + 2*k) - Z@(S@Z) - aa
+    x0 = np.sum(w)  # initial guess for the eignevalue we want to estimate
+    
+    # Newton method to compute an estimation of the largest eignevalue:
+    x = optimize.root_scalar(f, x0 = 1.9, fprime = fprime, method='newton')
+    l_max = x.root
+    
+    # compute the quaternion :
+    q0 = det((l_max +a)*np.eye(3) - S)
+    q = np.hstack((q0, (adjugate((l_max + a)*np.eye(3) - S))@Z ) )
+    
+    q = q/(norm(q,2))
+    
+    if q[0] < 0:
+        q = -1*q
+        
+    return q, EP_to_DCM(q)
+    
